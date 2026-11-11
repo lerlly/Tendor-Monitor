@@ -2,71 +2,128 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import time
 from datetime import datetime
 
-# 设置网页基本属性，需放在第一行
+# 设置网页基本属性
 st.set_page_config(page_title="全国核酸检测产品招标监控台", page_icon="🔬", layout="wide")
 
-# ================= 核心爬虫功能 =================
-# st.cache_data(ttl=3600) 表示这个函数的结果会缓存1小时（3600秒）
-# 这实现了“自动化监控”：网页每过1小时被访问时，会自动重新抓取最新数据
 @st.cache_data(ttl=3600)
-def fetch_bidding_data(keyword="核酸检测 试剂 提取仪"):
+def fetch_bidding_data(keyword="核酸检测 疾控"):
     """
-    爬取公共资源交易网或政府采购网的数据（示例框架）
-    注意：实际生产环境中，由于各网站反爬策略不同，需配置 Headers 或使用 Selenium
+    针对中国政府采购网(CCGP)的真实爬虫逻辑
     """
-    # 这里我们构造一个模拟的数据集来展示看板效果
-    # 实际应用中，你需要在此处用 requests.get() 访问招标网站并解析 HTML
-    mock_data = [
-        {"发布时间": datetime.now().strftime("%Y-%m-%d"), "项目名称": "XX省疾病预防控制中心核酸提取仪采购项目", "采购单位": "XX省疾控中心", "预算金额(万元)": 150.0, "状态": "公开招标", "链接": "https://example.com/1"},
-        {"发布时间": datetime.now().strftime("%Y-%m-%d"), "项目名称": "XX市第一人民医院核酸检测试剂盒采购", "采购单位": "XX市第一人民医院", "预算金额(万元)": 85.5, "状态": "中标公告", "链接": "https://example.com/2"},
-        {"发布时间": "2026-11-09", "项目名称": "XX区妇幼保健院全自动核酸扩增仪招标", "采购单位": "XX区妇幼保健院", "预算金额(万元)": 45.0, "状态": "公开招标", "链接": "https://example.com/3"},
-        {"发布时间": "2026-11-08", "项目名称": "XX海关口岸传染病核酸检测物资采购", "采购单位": "XX海关", "预算金额(万元)": 320.0, "状态": "意向公开", "链接": "https://example.com/4"}
-    ]
-    return pd.DataFrame(mock_data)
+    # 中国政府采购网的高级搜索接口
+    url = "http://search.ccgp.gov.cn/bxsearch"
+    
+    # 构造请求参数：指定搜索关键词，按时间倒序排，时间范围为近3个月
+    params = {
+        "searchtype": 1,
+        "page_index": 1,
+        "bidSort": 0,
+        "buyerName": "",
+        "projectId": "",
+        "pinYin": 0,
+        "displayZone": "",
+        "zoneId": "",
+        "pppStatus": 0,
+        "agentName": "",
+        "timeType": 5, # 5表示近3个月
+        "keyword": keyword
+    }
+    
+    # 模拟真实浏览器，防止被服务器直接拒绝
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Host": "search.ccgp.gov.cn"
+    }
+
+    data_list = []
+    
+    try:
+        # 发送网络请求
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        response.encoding = 'utf-8' # 确保中文字符正常解码
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # 政府采购网的搜索结果存放在 class="vT-srch-result-list-bid" 的 ul 标签下的 li 中
+            results = soup.find_all('ul', class_='vT-srch-result-list-bid')
+            
+            if results:
+                items = results[0].find_all('li')
+                for item in items:
+                    # 提取项目链接和名称
+                    a_tag = item.find('a')
+                    link = a_tag['href'] if a_tag else ""
+                    title = a_tag.get_text(strip=True) if a_tag else "未知项目名称"
+                    
+                    # 提取发布时间、采购人等附加信息
+                    info_span = item.find_all('span')
+                    publish_date = ""
+                    purchaser = ""
+                    
+                    for span in info_span:
+                        text = span.get_text(strip=True)
+                        if text.startswith("发布时间："):
+                            publish_date = text.replace("发布时间：", "").split(" ")[0]
+                        elif text.startswith("采购人："):
+                            purchaser = text.replace("采购人：", "")
+
+                    # 提取公告类型（如：公开招标、中标公告）
+                    strong_tag = item.find('strong')
+                    status = strong_tag.get_text(strip=True) if strong_tag else "未知类型"
+
+                    data_list.append({
+                        "发布时间": publish_date,
+                        "项目名称": title,
+                        "采购单位": purchaser,
+                        "状态": status,
+                        "链接": link
+                    })
+    except Exception as e:
+        st.error(f"抓取数据时发生错误，可能是网络波动或遭遇反爬拦截：{e}")
+
+    # 如果抓取失败或没有数据，返回一个空的标准化表格以防网页崩溃
+    if not data_list:
+        return pd.DataFrame(columns=["发布时间", "项目名称", "采购单位", "状态", "链接"])
+        
+    return pd.DataFrame(data_list)
 
 # ================= 网页 UI 搭建 =================
 
 st.title("🔬 疾控/医院核酸检测产品招标监控台")
-st.markdown("自动监控国内公开招标平台信息，数据每小时自动刷新一次。")
+st.markdown("数据源：中国政府采购网 (ccgp.gov.cn) | 每小时自动刷新")
 
-# 侧边栏：搜索与过滤
 with st.sidebar:
     st.header("🔍 监控条件设置")
-    search_keyword = st.text_input("关键词", value="核酸检测")
-    bidding_type = st.selectbox("公告类型", ["全部", "公开招标", "意向公开", "中标公告"])
+    search_keyword = st.text_input("关键词", value="核酸检测 提取仪")
+    bidding_type = st.selectbox("公告类型过滤", ["全部", "公开招标", "中标公告", "竞争性磋商", "询价公告"])
     st.markdown("---")
     st.write(f"上次刷新时间: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
     if st.button("🔄 立即强制刷新"):
-        st.cache_data.clear() # 清除缓存，立刻重新爬取
+        st.cache_data.clear()
 
-# 获取数据
-with st.spinner("正在全网检索最新招标信息，请稍候..."):
+with st.spinner("正在从中国政府采购网抓取最新数据，请稍候..."):
     df = fetch_bidding_data(search_keyword)
 
-# 数据过滤逻辑
-if bidding_type != "全部":
-    df = df[df["状态"] == bidding_type]
+if not df.empty:
+    if bidding_type != "全部":
+        df = df[df["状态"].str.contains(bidding_type, na=False)]
 
-# 顶部数据概览卡片
-col1, col2, col3 = st.columns(3)
-col1.metric("今日新增招标总数", f"{len(df[df['发布时间'] == datetime.now().strftime('%Y-%m-%d')])} 项")
-col2.metric("监控数据总量", f"{len(df)} 项")
-col3.metric("涉及总预算估算", f"{df['预算金额(万元)'].sum()} 万元")
+    col1, col2 = st.columns(2)
+    today_str = datetime.now().strftime('%Y.%m.%d')
+    col1.metric("今日新增招标", f"{len(df[df['发布时间'] == today_str])} 项")
+    col2.metric("当前检索结果总数", f"{len(df)} 项")
 
-st.markdown("### 📄 最新招标/中标明细")
-
-# 使用 Streamlit 的可交互表格展示数据
-st.dataframe(
-    df,
-    column_config={
-        "链接": st.column_config.LinkColumn("查看详情", display_text="点击前往原文")
-    },
-    use_container_width=True,
-    hide_index=True
-)
-
-st.markdown("---")
-st.caption("注：实际数据需接入中国政府采购网或各省公共资源交易中心 API 或通过定制爬虫获取。")
+    st.markdown("### 📄 真实招标/中标明细")
+    st.dataframe(
+        df,
+        column_config={
+            "链接": st.column_config.LinkColumn("查看详情", display_text="点击前往原网公告")
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.info("当前关键词未检索到近期招标信息，或网络请求被对方服务器拦截。")
